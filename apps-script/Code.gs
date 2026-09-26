@@ -11,8 +11,16 @@ function authorize(id, token) {
   if (!/^[\w-]{15,}$/.test(String(id)) || !token || PropertiesService.getScriptProperties().getProperty('session_' + id) !== token) throw Error('This upload session expired. Please start again.');
   return DriveApp.getFolderById(id);
 }
+function baseMissing(depts){return ['Sales','HR','Legal','Operations'].some(function(name){return !depts.some(function(d){return d.name===name;});});}
 function beginSubmission(p) {
   if (!p || p.website) throw Error('Unable to start this submission.');
+  if (!/^[a-f0-9-]{36}$/.test(String(p.clientKey || ''))) throw Error('Please reload and start this intake again.');
+  var lock=LockService.getScriptLock(); lock.waitLock(30000);
+  try { return beginLocked(p); } finally { lock.releaseLock(); }
+}
+function beginLocked(p) {
+  var props=PropertiesService.getScriptProperties(), clientProp='v9_client_'+p.clientKey, existing=props.getProperty(clientProp);
+  if (existing) { var prior=JSON.parse(existing); if(props.getProperty('session_'+prior.id)!==prior.token)throw Error('This intake session is no longer available. Contact us for help.');ensureSubmissionRecord(prior.id,prior.data);ensureDepartmentFolders(prior.id,prior.data.departments); return {id:prior.id,token:prior.token}; }
   if (!/^(intranet|website|both)$/.test(p.projectType)) throw Error('Choose a project type.');
   var company = safe(p.company, 100), contact = safe(p.contact, 100), email = safe(p.email, 160);
   if (!company || !contact || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw Error('Company, contact name, and a valid email are required.');
@@ -20,21 +28,39 @@ function beginSubmission(p) {
   var depts = p.departments.map(function(d) {
     return {name:folderName(d.name),head:safe(d.head, 100),headEmail:safe(d.headEmail, 160),purpose:safe(d.purpose, 2000),tools:safe(d.tools, 2000),links:safe(d.links, 2000),include:safe(d.include, 2000)};
   });
+  if ((p.projectType==='website'||p.projectType==='both') && depts[0].name!=='Website assets') throw Error('Website projects need a website assets step.');
+  if (p.projectType==='both' && baseMissing(depts)) throw Error('Both projects need website assets and four team departments.');
   if (depts.some(function(d) {return !d.name || !d.head || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.headEmail);})) throw Error('Every department needs its name, head, and head email.');
   var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HHmmss');
-  var parent = root().createFolder(folderName(company) + ' - ' + now + ' - ' + Utilities.getUuid().slice(0,8));
   var token = Utilities.getUuid() + Utilities.getUuid();
-  PropertiesService.getScriptProperties().setProperty('session_' + parent.getId(), token);
   var ratings = Array.isArray(p.ratings) ? p.ratings.filter(function(r){return r && /^[a-z-]{3,40}$/.test(r.module) && /^(love|must|dislike)$/.test(r.rating);}).slice(0,30) : [];
   var aiChoices = ['customer_appointments','estimator_appointments','team_jobs','quotes_estimates','photo_estimates','schedule_updates'];
   var selected = p.aiServices && Array.isArray(p.aiServices.selected) ? p.aiServices.selected.filter(function(key) {return aiChoices.indexOf(key) !== -1;}) : [];
   var aiServices = {selected:aiChoices.filter(function(key) {return selected.indexOf(key) !== -1;}),other:safe(p.aiServices && p.aiServices.other,1000),details:{}};
   aiServices.selected.forEach(function(key){var obj=p.aiServices && p.aiServices.details && p.aiServices.details[key] || {}; aiServices.details[key]={}; Object.keys(obj).slice(0,12).forEach(function(field){if(/^[a-zA-Z]{2,40}$/.test(field))aiServices.details[key][field]=safe(obj[field],2000);});});
-  var data = {projectType:p.projectType,ratings:ratings,aiServices:aiServices,company:company,industry:safe(p.industry,100),contact:contact,email:email,phone:safe(p.phone,80),departments:depts,submittedAt:new Date().toISOString()};
+  var data = {clientKey:p.clientKey,projectType:p.projectType,ratings:ratings,aiServices:aiServices,company:company,industry:safe(p.industry,100),contact:contact,email:email,phone:safe(p.phone,80),departments:depts,submittedAt:new Date().toISOString()};
+  var parent=root().createFolder(folderName(company)+' - '+now+' - '+Utilities.getUuid().slice(0,8));
+  props.setProperty('session_'+parent.getId(),token);
   parent.createFile('Intake answers.json', JSON.stringify(data,null,2), MimeType.PLAIN_TEXT);
-  try { supaRequest('post','/rest/v1/client_intakes', {id:parent.getId(), answers:data, status:'uploading', drive_url:parent.getUrl()}); } catch(e) { parent.setTrashed(true); PropertiesService.getScriptProperties().deleteProperty('session_' + parent.getId()); throw Error('Secure intake storage is unavailable. Nothing was submitted. '+e.message); }
-  depts.forEach(function(d,i) { parent.createFolder(String(i+1).padStart(2,'0') + ' - ' + d.name); });
+  props.setProperty(clientProp,JSON.stringify({id:parent.getId(),token:token,data:data}));
+  ensureSubmissionRecord(parent.getId(),data);
+  ensureDepartmentFolders(parent.getId(),depts);
   return {id:parent.getId(),token:token};
+}
+function ensureSubmissionRecord(id,data) {
+  var rows=JSON.parse(supaRequest('get','/rest/v1/client_intakes?id=eq.'+encodeURIComponent(id)+'&select=id',null));
+  if(rows.length===1)return;
+  if(rows.length)throw Error('Secure intake has conflicting records. Contact us for help.');
+  try {supaRequest('post','/rest/v1/client_intakes',{id:id,answers:data,status:'uploading',drive_url:DriveApp.getFolderById(id).getUrl()});}
+  catch(e){ // The write may have succeeded even if its response failed. A retry checks the same ID.
+    var verify=JSON.parse(supaRequest('get','/rest/v1/client_intakes?id=eq.'+encodeURIComponent(id)+'&select=id',null));
+    if(verify.length!==1)throw Error('We could not confirm secure storage. Keep this tab open and retry.');
+  }
+}
+function ensureDepartmentFolders(id,depts) {
+  var parent=DriveApp.getFolderById(id);
+  depts.forEach(function(d,i){var name=String(i+1).padStart(2,'0')+' - '+d.name;if(!parent.getFoldersByName(name).hasNext())parent.createFolder(name);});
+
 }
 function uploadFile(id,token,index,category,name,mime,base64) {
   var parent = authorize(id,token);
@@ -57,11 +83,20 @@ function finishSubmission(id,token) {
   var parent=authorize(id,token), file=parent.getFilesByName('Intake answers.json');
   if (!file.hasNext()) throw Error('Answers were not found.');
   var p=JSON.parse(file.next().getBlob().getDataAsString());
-  var updated = JSON.parse(supaRequest('patch','/rest/v1/client_intakes?id=eq.'+encodeURIComponent(id),{status:'complete',completed_at:new Date().toISOString()},{Prefer:'return=representation'}));
-  if (!Array.isArray(updated) || updated.length !== 1 || updated[0].id !== id) throw Error('Secure intake record was not finalized.');
-  MailApp.sendEmail({to:TO,subject:'New client intake: '+p.company,body:'New customer onboarding submission from '+p.contact+' ('+p.email+').\nCompany: '+p.company+'\nIndustry: '+p.industry+'\nPhone: '+p.phone+'\nProject type: '+p.projectType+'\nDesign preferences: '+p.ratings.length+' rated modules\nAI services (MCP): '+(p.aiServices && p.aiServices.selected && p.aiServices.selected.length ? p.aiServices.selected.map(function(key){return ({customer_appointments:'Book appointments in my calendar',estimator_appointments:'Book appointments in my estimator\'s calendar',quotes_estimates:'Provide quotes/estimates',team_jobs:'Book jobs in my services/team calendar',photo_estimates:'Photo-based estimates and booking',schedule_updates:'Scheduling updates'})[key] || key;}).join(', ') : 'None selected')+'\nOther AI services: '+(p.aiServices && p.aiServices.other || 'None')+'\nAI service details: '+JSON.stringify(p.aiServices && p.aiServices.details || {})+'\nDepartments: '+p.departments.map(function(d){return d.name;}).join(', ')+'\n\nAnswers and uploaded files: '+parent.getUrl()});
-  PropertiesService.getScriptProperties().deleteProperty('session_' + id);
-  return {ok:true};
+  var props=PropertiesService.getScriptProperties(), key='v9_finish_'+id;
+  var lock=LockService.getScriptLock();lock.waitLock(30000);
+  try {
+    if (props.getProperty(key)==='complete') return {ok:true};
+    var updated=JSON.parse(supaRequest('patch','/rest/v1/client_intakes?id=eq.'+encodeURIComponent(id),{status:'complete',completed_at:new Date().toISOString()},{Prefer:'return=representation'}));
+    if(!Array.isArray(updated)||updated.length!==1||updated[0].id!==id)throw Error('Secure intake record was not finalized.');
+    if(props.getProperty(key)!=='notifying') {
+      props.setProperty(key,'notifying');
+      try { MailApp.sendEmail({to:TO,subject:'New client intake: '+p.company,body:'New customer onboarding submission from '+p.contact+' ('+p.email+').\nCompany: '+p.company+'\nIndustry: '+p.industry+'\nPhone: '+p.phone+'\nProject type: '+p.projectType+'\nDesign preferences: '+p.ratings.length+' rated modules\nAI options: '+(p.aiServices && p.aiServices.selected && p.aiServices.selected.length ? p.aiServices.selected.join(', ') : 'None selected')+'\nOther AI options: '+(p.aiServices && p.aiServices.other || 'None')+'\nWebsite and departments: '+p.departments.map(function(d){return d.name;}).join(', ')+'\n\nAnswers and uploaded files: '+parent.getUrl()}); }
+      catch(e){props.deleteProperty(key);throw Error('Answers were saved, but the notification could not be sent. Please retry.');}
+    }
+    props.setProperty(key,'complete');
+    return {ok:true};
+  } finally {lock.releaseLock();}
 }
 
 // Server-only settings: SUPABASE_URL, SUPABASE_SECRET_KEY, REVIEW_BOOKING_URL.
