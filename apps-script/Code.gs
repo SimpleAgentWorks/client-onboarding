@@ -20,7 +20,7 @@ function beginSubmission(p) {
 }
 function beginLocked(p) {
   var props=PropertiesService.getScriptProperties(), clientProp='v9_client_'+p.clientKey, existing=props.getProperty(clientProp);
-  if (existing) { var prior=JSON.parse(existing); if(props.getProperty('session_'+prior.id)!==prior.token)throw Error('This intake session is no longer available. Contact us for help.');ensureSubmissionRecord(prior.id,prior.data);ensureDepartmentFolders(prior.id,prior.data.departments); return {id:prior.id,token:prior.token}; }
+  if (existing) { var prior=JSON.parse(existing); if(props.getProperty('session_'+prior.id)!==prior.token)throw Error('This intake session is no longer available. Contact us for help.');var folder=DriveApp.getFolderById(prior.id),answers=folder.getFilesByName('Intake answers.json');if(!answers.hasNext())throw Error('Saved answers could not be found. Contact us for help.');var priorData=JSON.parse(answers.next().getBlob().getDataAsString());ensureSubmissionRecord(prior.id,priorData);ensureDepartmentFolders(prior.id,priorData.departments); return {id:prior.id,token:prior.token}; }
   if (!/^(intranet|website|both)$/.test(p.projectType)) throw Error('Choose a project type.');
   var company = safe(p.company, 100), contact = safe(p.contact, 100), email = safe(p.email, 160);
   if (!company || !contact || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw Error('Company, contact name, and a valid email are required.');
@@ -42,7 +42,7 @@ function beginLocked(p) {
   var parent=root().createFolder(folderName(company)+' - '+now+' - '+Utilities.getUuid().slice(0,8));
   props.setProperty('session_'+parent.getId(),token);
   parent.createFile('Intake answers.json', JSON.stringify(data,null,2), MimeType.PLAIN_TEXT);
-  props.setProperty(clientProp,JSON.stringify({id:parent.getId(),token:token,data:data}));
+  props.setProperty(clientProp,JSON.stringify({id:parent.getId(),token:token}));
   ensureSubmissionRecord(parent.getId(),data);
   ensureDepartmentFolders(parent.getId(),depts);
   return {id:parent.getId(),token:token};
