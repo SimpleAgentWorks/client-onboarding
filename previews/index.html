@@ -1,0 +1,11 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SimpleAgentWorks design example</title></head><body><script>
+const modules=new Set('text-mask sticky-stack zoom-parallax horizontal-scroll sticky-cards svg-draw curtain-reveal split-scroll color-shift cursor-reactive accordion-slider cursor-reveal image-trail flip-cards magnetic-grid spotlight-border drag-pan view-transitions particle-button odometer coverflow dynamic-island dock-nav text-scramble kinetic-marquee mesh-gradient circular-text glitch-effect typewriter gradient-stroke'.split(' '));
+const name=new URLSearchParams(location.search).get('module');
+if(!modules.has(name)) document.body.textContent='Example not found';
+else fetch('https://simpleagentworks.github.io/cinematic-modules/'+name+'.html').then(r=>{if(!r.ok)throw Error('Preview unavailable');return r.text()}).then(html=>{
+  const doc=new DOMParser().parseFromString(html,'text/html');
+  doc.querySelectorAll('a.saw-nav').forEach(a=>{if(a.textContent.toLowerCase().includes('all modules'))a.remove()});
+  const base=doc.createElement('base');base.href='https://simpleagentworks.github.io/cinematic-modules/';doc.head.prepend(base);
+  document.open();document.write('<!doctype html>'+doc.documentElement.outerHTML);document.close();
+}).catch(()=>document.body.textContent='Preview unavailable. Please try again later.');
+</script></body></html>
