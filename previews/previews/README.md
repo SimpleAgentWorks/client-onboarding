@@ -1,0 +1,1 @@
+Preview modules are mirrored from the licensed SimpleAgentWorks gallery with the disruptive in-frame "All modules" navigation removed. The original MIT notices and credit remain. This folder is part of the client-onboarding portal; its examples are not a separate intake flow.
